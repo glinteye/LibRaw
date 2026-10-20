@@ -1342,7 +1342,13 @@ int LibRaw::open_datastream(LibRaw_abstract_datastream *stream)
 final:;
 
   if (P1.raw_count < 1)
+  {
+    if ((imgdata.rawparams.options & LIBRAW_RAWOPTIONS_ALLOW_THUMBNAIL_ONLY) &&
+        (imgdata.progress_flags & LIBRAW_PROGRESS_IDENTIFY) &&
+        imgdata.thumbs_list.thumbcount > 0)
+      return LIBRAW_SUCCESS;
     return LIBRAW_FILE_UNSUPPORTED;
+  }
 
   write_fun = &LibRaw::write_ppm_tiff;
 
