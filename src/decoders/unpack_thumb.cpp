@@ -463,6 +463,14 @@ int LibRaw::unpack_thumb(void)
       ID.input->seek(ID.toffset, SEEK_SET);
       if (Tformat == LIBRAW_INTERNAL_THUMBNAIL_JPEG || Tformat == LIBRAW_INTERNAL_THUMBNAIL_JPEGXL)
       {
+        // An earlier Canon HEVC unpack left tlength as the HEIF's size, not the stored one.
+        if (T.tformat == LIBRAW_THUMBNAIL_H265)
+          for (int idx = 0; idx < imgdata.thumbs_list.thumbcount; idx++)
+            if (imgdata.thumbs_list.thumblist[idx].toffset == ID.toffset)
+            {
+              T.tlength = imgdata.thumbs_list.thumblist[idx].tlength;
+              break;
+            }
         THUMB_SIZE_CHECKTNZ(T.tlength);
         if (T.thumb)
           free(T.thumb);
