@@ -13,6 +13,317 @@
  */
 
 #include "../../internal/libraw_cxx_defs.h"
+#include <vector>
+
+namespace
+{
+// Canon CR3 files shot with HDR PQ have no JPEG, only HEVC previews. The camera
+// stores those as configuration boxes and coded pictures, which no decoder reads,
+// so they are put into a HEIF file here, without re-encoding.
+typedef std::vector<unsigned char> HeifBytes;
+
+struct HeifSpan
+{
+  const unsigned char *data;
+  size_t size;
+};
+
+unsigned read_be32(const unsigned char *p)
+{
+  return (unsigned(p[0]) << 24) | (unsigned(p[1]) << 16) | (unsigned(p[2]) << 8) | p[3];
+}
+
+// The content of the first `kind` box, looking until something is not a box.
+bool find_box(const unsigned char *boxes, size_t length, const char *kind, HeifSpan *found)
+{
+  while (length >= 8)
+  {
+    const size_t size = read_be32(boxes);
+    if (size < 8 || size > length)
+      return false;
+    if (!memcmp(boxes + 4, kind, 4))
+    {
+      found->data = boxes + 8;
+      found->size = size - 8;
+      return true;
+    }
+    boxes += size;
+    length -= size;
+  }
+  return false;
+}
+
+void put_u8(HeifBytes &out, unsigned value) { out.push_back((unsigned char)value); }
+
+void put_u16(HeifBytes &out, unsigned value)
+{
+  put_u8(out, (value >> 8) & 0xff);
+  put_u8(out, value & 0xff);
+}
+
+void put_u32(HeifBytes &out, unsigned value)
+{
+  put_u16(out, value >> 16);
+  put_u16(out, value & 0xffff);
+}
+
+void put_bytes(HeifBytes &out, const void *bytes, size_t size)
+{
+  const unsigned char *start = (const unsigned char *)bytes;
+  out.insert(out.end(), start, start + size);
+}
+
+void set_u32(HeifBytes &out, size_t at, unsigned value)
+{
+  out[at] = (unsigned char)(value >> 24);
+  out[at + 1] = (unsigned char)(value >> 16);
+  out[at + 2] = (unsigned char)(value >> 8);
+  out[at + 3] = (unsigned char)value;
+}
+
+size_t open_box(HeifBytes &out, const char *kind)
+{
+  const size_t start = out.size();
+  put_u32(out, 0);
+  put_bytes(out, kind, 4);
+  return start;
+}
+
+size_t open_full_box(HeifBytes &out, const char *kind, unsigned version, unsigned flags)
+{
+  const size_t start = open_box(out, kind);
+  put_u32(out, (version << 24) | flags);
+  return start;
+}
+
+void close_box(HeifBytes &out, size_t start) { set_u32(out, start, unsigned(out.size() - start)); }
+
+void put_box(HeifBytes &out, const char *kind, const HeifSpan &content)
+{
+  const size_t box = open_box(out, kind);
+  put_bytes(out, content.data, content.size);
+  close_box(out, box);
+}
+
+void put_image_size(HeifBytes &out, unsigned width, unsigned height)
+{
+  const size_t box = open_full_box(out, "ispe", 0, 0);
+  put_u32(out, width);
+  put_u32(out, height);
+  close_box(out, box);
+}
+
+void put_item_info(HeifBytes &out, unsigned item, const char *kind, unsigned flags)
+{
+  const size_t box = open_full_box(out, "infe", 2, flags);
+  put_u16(out, item);
+  put_u16(out, 0);
+  put_bytes(out, kind, 4);
+  put_u8(out, 0);
+  close_box(out, box);
+}
+
+void put_item_location(HeifBytes &out, unsigned item, unsigned method, unsigned offset, unsigned size)
+{
+  put_u16(out, item);
+  put_u16(out, method);
+  put_u16(out, 0); // data reference index
+  put_u16(out, 1); // extent count
+  put_u32(out, offset);
+  put_u32(out, size);
+}
+
+void put_associations(HeifBytes &out, unsigned item, const unsigned char *properties, unsigned count)
+{
+  put_u16(out, item);
+  put_u8(out, count);
+  put_bytes(out, properties, count);
+}
+
+// `display_*` is the preview's size, from the top left of the coded picture; a grid
+// carries its own size. `flip` is sizes.flip. False means the data cannot be used.
+bool canon_hevc_to_heif(const unsigned char *data, size_t length, unsigned display_width,
+                        unsigned display_height, int flip, HeifBytes &heif)
+{
+  HeifSpan cisz, hvcc, colr, pixi, imgd, grid;
+  if (!find_box(data, length, "CISZ", &cisz) || !find_box(data, length, "hvcC", &hvcc) ||
+      !find_box(data, length, "colr", &colr) || !find_box(data, length, "pixi", &pixi) ||
+      !find_box(data, length, "IMGD", &imgd) || cisz.size < 12)
+    return false;
+  const unsigned coded_width = read_be32(cisz.data + 4);
+  const unsigned coded_height = read_be32(cisz.data + 8);
+
+  // IMGD holds each coded picture as a 4-byte length and its NAL units.
+  std::vector<size_t> starts, sizes;
+  for (size_t at = 0; at < imgd.size;)
+  {
+    if (imgd.size - at < 4)
+      return false;
+    const size_t size = read_be32(imgd.data + at);
+    at += 4;
+    if (size == 0 || size > imgd.size - at)
+      return false;
+    starts.push_back(at);
+    sizes.push_back(size);
+    at += size;
+  }
+
+  // flip 3, 5 and 6 are EXIF orientations 3, 8 and 6, the only ones a camera writes.
+  // HEIF rotates anticlockwise in quarter turns.
+  unsigned quarter_turns;
+  switch (flip)
+  {
+  case 0: quarter_turns = 0; break;
+  case 3: quarter_turns = 2; break;
+  case 5: quarter_turns = 1; break;
+  case 6: quarter_turns = 3; break;
+  default: return false;
+  }
+
+  const bool is_grid = find_box(data, length, "GRID", &grid);
+  if (is_grid)
+  {
+    // Version and flags, tile count, then rows and columns less one in the last two
+    // bytes of a word, then the 16-bit output size.
+    if (grid.size < 16 || (grid.data[10] + 1u) * (grid.data[11] + 1u) != starts.size() ||
+        starts.size() > 0xfffe)
+      return false;
+  }
+  else if (starts.size() != 1 || !display_width || !display_height ||
+           display_width > coded_width || display_height > coded_height)
+    return false;
+
+  const unsigned picture_count = unsigned(starts.size());
+  const unsigned primary = is_grid ? picture_count + 1 : 1;
+  const unsigned char coded_properties[] = {0x81, 2, 3, 4}; // hvcC (essential), ispe, colr, pixi
+  heif.reserve(imgd.size + 1024 + 64 * starts.size());
+
+  size_t box = open_box(heif, "ftyp");
+  put_bytes(heif, "heix", 4);
+  put_u32(heif, 0);
+  put_bytes(heif, "mif1", 4);
+  put_bytes(heif, "heix", 4);
+  close_box(heif, box);
+
+  const size_t meta = open_full_box(heif, "meta", 0, 0);
+  box = open_full_box(heif, "hdlr", 0, 0);
+  put_u32(heif, 0);
+  put_bytes(heif, "pict", 4);
+  for (int i = 0; i < 13; i++)
+    put_u8(heif, 0);
+  close_box(heif, box);
+
+  box = open_full_box(heif, "pitm", 0, 0);
+  put_u16(heif, primary);
+  close_box(heif, box);
+
+  // Picture offsets are relative to the mdat content until its position is known.
+  std::vector<size_t> offsets_to_fix;
+  box = open_full_box(heif, "iloc", 1, 0);
+  put_u8(heif, 0x44); // 4-byte offsets and lengths
+  put_u8(heif, 0);    // no base offset, no extent index
+  put_u16(heif, picture_count + (is_grid ? 1 : 0));
+  for (unsigned i = 0; i < picture_count; i++)
+  {
+    put_item_location(heif, i + 1, 0, unsigned(starts[i]), unsigned(sizes[i]));
+    offsets_to_fix.push_back(heif.size() - 8);
+  }
+  if (is_grid)
+    put_item_location(heif, primary, 1, 0, 8); // construction method 1: within idat
+  close_box(heif, box);
+
+  box = open_full_box(heif, "iinf", 0, 0);
+  put_u16(heif, picture_count + (is_grid ? 1 : 0));
+  for (unsigned i = 0; is_grid && i < picture_count; i++)
+    put_item_info(heif, i + 1, "hvc1", 1); // flag 1: hidden, shown only through the grid
+  put_item_info(heif, primary, is_grid ? "grid" : "hvc1", 0);
+  close_box(heif, box);
+
+  if (is_grid)
+  {
+    box = open_full_box(heif, "iref", 0, 0);
+    const size_t references = open_box(heif, "dimg");
+    put_u16(heif, primary);
+    put_u16(heif, picture_count);
+    for (unsigned i = 0; i < picture_count; i++)
+      put_u16(heif, i + 1);
+    close_box(heif, references);
+    close_box(heif, box);
+  }
+
+  unsigned char primary_properties[8];
+  unsigned primary_property_count = 0;
+  unsigned next_property = 5;
+  const size_t iprp = open_box(heif, "iprp");
+  const size_t ipco = open_box(heif, "ipco");
+  put_box(heif, "hvcC", hvcc);
+  put_image_size(heif, coded_width, coded_height);
+  put_box(heif, "colr", colr);
+  put_box(heif, "pixi", pixi);
+  if (is_grid)
+  {
+    put_image_size(heif, (grid.data[12] << 8) | grid.data[13], (grid.data[14] << 8) | grid.data[15]);
+    primary_properties[primary_property_count++] = (unsigned char)next_property++;
+    primary_properties[primary_property_count++] = 3;
+    primary_properties[primary_property_count++] = 4;
+  }
+  else
+  {
+    memcpy(primary_properties, coded_properties, sizeof(coded_properties));
+    primary_property_count = sizeof(coded_properties);
+    if (display_width != coded_width || display_height != coded_height)
+    {
+      // A clean aperture is positioned by its centre's offset from the picture's centre.
+      box = open_box(heif, "clap");
+      put_u32(heif, display_width);
+      put_u32(heif, 1);
+      put_u32(heif, display_height);
+      put_u32(heif, 1);
+      put_u32(heif, unsigned(int(display_width) - int(coded_width)));
+      put_u32(heif, 2);
+      put_u32(heif, unsigned(int(display_height) - int(coded_height)));
+      put_u32(heif, 2);
+      close_box(heif, box);
+      primary_properties[primary_property_count++] = (unsigned char)(0x80 | next_property++);
+    }
+  }
+  if (quarter_turns)
+  {
+    box = open_box(heif, "irot");
+    put_u8(heif, quarter_turns);
+    close_box(heif, box);
+    primary_properties[primary_property_count++] = (unsigned char)(0x80 | next_property++);
+  }
+  close_box(heif, ipco);
+
+  box = open_full_box(heif, "ipma", 0, 0);
+  put_u32(heif, is_grid ? picture_count + 1 : 1);
+  for (unsigned i = 0; is_grid && i < picture_count; i++)
+    put_associations(heif, i + 1, coded_properties, sizeof(coded_properties));
+  put_associations(heif, primary, primary_properties, primary_property_count);
+  close_box(heif, box);
+  close_box(heif, iprp);
+
+  if (is_grid)
+  {
+    box = open_box(heif, "idat");
+    put_u16(heif, 0); // version and flags: 16-bit output size
+    put_u8(heif, grid.data[10]);
+    put_u8(heif, grid.data[11]);
+    put_bytes(heif, grid.data + 12, 4);
+    close_box(heif, box);
+  }
+  close_box(heif, meta);
+
+  box = open_box(heif, "mdat");
+  const size_t mdat_content = heif.size();
+  put_bytes(heif, imgd.data, imgd.size);
+  close_box(heif, box);
+  for (size_t i = 0; i < offsets_to_fix.size(); i++)
+    set_u32(heif, offsets_to_fix[i], read_be32(&heif[offsets_to_fix[i]]) + unsigned(mdat_content));
+  return true;
+}
+} // namespace
 
 #ifndef NO_JPEG
 struct jpegErrorManager
@@ -161,10 +472,11 @@ int LibRaw::unpack_thumb(void)
         T.thumb = (char *)malloc(T.tlength);
 #endif
 		unsigned config_length = libraw_internal_data.unpacker_data.cr3_hevc_config_length;
-		if (config_length && ID.toffset == libraw_internal_data.unpacker_data.cr3_hevc_sample_offset)
+		const bool hevc_track = config_length && ID.toffset == libraw_internal_data.unpacker_data.cr3_hevc_sample_offset;
+		if (hevc_track)
 		{
 			// The CR3 sample holds only image data; its configuration is in the
-			// track header. Join them in the layout of the H.265 PRVW data below:
+			// track header. Join them in the layout of the H.265 PRVW data:
 			// configuration boxes, then the image data in an IMGD box.
 			unsigned imgd_length = T.tlength - config_length;
 			unsigned sample_length = imgd_length - 8;
@@ -180,11 +492,9 @@ int LibRaw::unpack_thumb(void)
 			ID.input->seek(ID.toffset, SEEK_SET);
 			if (ID.input->read(imgd + 8, 1, sample_length) != int(sample_length))
 				return LIBRAW_IO_ERROR;
-			T.tformat = LIBRAW_THUMBNAIL_H265;
-			SET_PROC_FLAG(LIBRAW_PROGRESS_THUMB_LOAD);
-			return 0;
 		}
-        ID.input->read(T.thumb, 1, T.tlength);
+		else
+			ID.input->read(T.thumb, 1, T.tlength);
 		unsigned char *tthumb = (unsigned char *)T.thumb;
 		if (Tformat == LIBRAW_INTERNAL_THUMBNAIL_JPEGXL)
 		{
@@ -192,15 +502,28 @@ int LibRaw::unpack_thumb(void)
           SET_PROC_FLAG(LIBRAW_PROGRESS_THUMB_LOAD);
           return 0;
 		}
-		if (load_raw == &LibRaw::crxLoadRaw && T.tlength > 0xE0)
+		// Check if it is canon H.265 preview:  CISZ at bytes 4-6, CISZ prefix is 000n
+		if (hevc_track || (load_raw == &LibRaw::crxLoadRaw && T.tlength > 0xE0 && tthumb[0] == 0 &&
+		                   tthumb[1] == 0 && tthumb[2] == 0 && !memcmp(tthumb + 4, "CISZ", 4)))
 		{
-			// Check if it is canon H.265 preview:  CISZ at bytes 4-6, CISZ prefix is 000n
-			if (tthumb[0] == 0 && tthumb[1] == 0 && tthumb[2] == 0 && !memcmp(tthumb + 4, "CISZ", 4))
-			{
-				T.tformat = LIBRAW_THUMBNAIL_H265;
-				SET_PROC_FLAG(LIBRAW_PROGRESS_THUMB_LOAD);
-				return 0;
-			}
+			unsigned display_width = 0, display_height = 0;
+			for (int idx = 0; idx < imgdata.thumbs_list.thumbcount; idx++)
+				if (imgdata.thumbs_list.thumblist[idx].toffset == ID.toffset)
+				{
+					display_width = imgdata.thumbs_list.thumblist[idx].twidth;
+					display_height = imgdata.thumbs_list.thumblist[idx].theight;
+					break;
+				}
+			HeifBytes heif;
+			if (!canon_hevc_to_heif(tthumb, T.tlength, display_width, display_height, S.flip, heif))
+				return LIBRAW_UNSUPPORTED_THUMBNAIL;
+			free(T.thumb);
+			T.thumb = (char *)malloc(heif.size());
+			memcpy(T.thumb, &heif[0], heif.size());
+			T.tlength = unsigned(heif.size());
+			T.tformat = LIBRAW_THUMBNAIL_H265;
+			SET_PROC_FLAG(LIBRAW_PROGRESS_THUMB_LOAD);
+			return 0;
 		}
         tthumb[0] = 0xff;
         tthumb[1] = 0xd8;

@@ -678,10 +678,14 @@ int LibRaw::parseCR3(UINT64 oAtomList,
     }
 	else if (!strcmp(AtomNameStack, "moovuuidTHMB") && szAtom > 24)
 	{
-		unsigned char xdata[16];
+		unsigned char xdata[16], first_box[8];
 		memset(xdata, 0, sizeof(xdata));
+		memset(first_box, 0, sizeof(first_box));
 		fread(xdata, 16, 1, ifp);
 		INT64 xoffset = ftell(ifp);
+		fread(first_box, 8, 1, ifp);
+		// An HEVC thumbnail has two more bytes before its size than a JPEG one.
+		int size_at = memcmp(first_box + 4, "CISZ", 4) ? 4 : 6;
 		if (imgdata.thumbs_list.thumbcount < LIBRAW_THUMBNAIL_MAXCOUNT)
 		{
 			bool do_add = true;
@@ -699,8 +703,8 @@ int LibRaw::parseCR3(UINT64 oAtomList,
               imgdata.thumbs_list.thumblist[idx].tlength = unsigned(szAtom-24LL);
 			  imgdata.thumbs_list.thumblist[idx].tflip = 0xffff;
               imgdata.thumbs_list.thumblist[idx].tmisc = (3 << 5) | 8; // 3 samples/8 bps
-              imgdata.thumbs_list.thumblist[idx].twidth = (xdata[4] << 8) + xdata[5];
-              imgdata.thumbs_list.thumblist[idx].theight = (xdata[6] << 8) + xdata[7];
+              imgdata.thumbs_list.thumblist[idx].twidth = (xdata[size_at] << 8) + xdata[size_at + 1];
+              imgdata.thumbs_list.thumblist[idx].theight = (xdata[size_at + 2] << 8) + xdata[size_at + 3];
               imgdata.thumbs_list.thumbcount++;
             }
 		}

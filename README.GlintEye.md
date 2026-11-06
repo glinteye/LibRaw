@@ -30,16 +30,18 @@ full-size image is a grid of HEVC tiles in the file's first track, and stock
 LibRaw does not list it.
 
 This branch lists it as one more thumbnail with its real size, and the default
-`libraw_unpack_thumb()` selects it, as it does a CR3's full-size JPEG.
-`libraw_dcraw_make_mem_thumb()` returns it as `LIBRAW_IMAGE_H265`, in the
-layout of the `PRVW` data: the `GRID`, `CISZ`, `hvcC`, `colr` and `pixi`
-boxes, then an `IMGD` box holding each tile as a 4-byte length followed by its
-NAL units.
+`libraw_unpack_thumb()` selects it, as it does a CR3's full-size JPEG. Stock
+LibRaw returns `PRVW` and `THMB` as configuration boxes and coded pictures, which
+no decoder reads, so here all three come back as complete HEIF files, without
+re-encoding and carrying the photo's orientation. `libraw_dcraw_make_mem_thumb()`
+still reports them as `LIBRAW_IMAGE_H265`.
 
 ## Tags
 
-The patches are the commits after the upstream `0.22.2` tag on this branch;
-release tags are named `0.22.2-glinteye.N`.
+The changes are the commits after the upstream `0.22.2` tag on this branch;
+release tags are named `0.22.2-glinteye.N`. This branch also tracks the generated
+build files from LibRaw's release tarball, so a tag's source archive builds with
+`./configure` alone. When moving to a new LibRaw release, take them from its tarball.
 
 ## License
 
