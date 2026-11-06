@@ -161,7 +161,7 @@ bool canon_hevc_to_heif(const unsigned char *data, size_t length, unsigned displ
       return false;
     const size_t size = read_be32(imgd.data + at);
     at += 4;
-    if (size == 0 || size > imgd.size - at)
+    if (size == 0 || size > imgd.size - at || starts.size() == 0xfffe)
       return false;
     starts.push_back(at);
     sizes.push_back(size);
@@ -185,8 +185,7 @@ bool canon_hevc_to_heif(const unsigned char *data, size_t length, unsigned displ
   {
     // Version and flags, tile count, then rows and columns less one in the last two
     // bytes of a word, then the 16-bit output size.
-    if (grid.size < 16 || (grid.data[10] + 1u) * (grid.data[11] + 1u) != starts.size() ||
-        starts.size() > 0xfffe)
+    if (grid.size < 16 || (grid.data[10] + 1u) * (grid.data[11] + 1u) != starts.size())
       return false;
   }
   else if (starts.size() != 1 || !display_width || !display_height ||
@@ -525,8 +524,15 @@ int LibRaw::unpack_thumb(void)
 					break;
 				}
 			HeifBytes heif;
-			if (!canon_hevc_to_heif(tthumb, T.tlength, display_width, display_height, S.flip, heif))
-				return LIBRAW_UNSUPPORTED_THUMBNAIL;
+			try
+			{
+				if (!canon_hevc_to_heif(tthumb, T.tlength, display_width, display_height, S.flip, heif))
+					return LIBRAW_UNSUPPORTED_THUMBNAIL;
+			}
+			catch (const std::bad_alloc &)
+			{
+				return LIBRAW_UNSUFFICIENT_MEMORY;
+			}
 			free(T.thumb);
 			T.thumb = (char *)malloc(heif.size());
 			memcpy(T.thumb, &heif[0], heif.size());
