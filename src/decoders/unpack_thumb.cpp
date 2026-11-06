@@ -279,9 +279,9 @@ bool canon_hevc_to_heif(const unsigned char *data, size_t length, unsigned displ
       put_u32(heif, 1);
       put_u32(heif, display_height);
       put_u32(heif, 1);
-      put_u32(heif, unsigned(int(display_width) - int(coded_width)));
+      put_u32(heif, display_width - coded_width); // signed fields, in two's complement
       put_u32(heif, 2);
-      put_u32(heif, unsigned(int(display_height) - int(coded_height)));
+      put_u32(heif, display_height - coded_height);
       put_u32(heif, 2);
       close_box(heif, box);
       primary_properties[primary_property_count++] = (unsigned char)(0x80 | next_property++);
@@ -486,6 +486,8 @@ int LibRaw::unpack_thumb(void)
 			// The CR3 sample holds only image data; its configuration is in the
 			// track header. Join them in the layout of the H.265 PRVW data:
 			// configuration boxes, then the image data in an IMGD box.
+			if (T.tlength < 8 || T.tlength - 8 < config_length)
+				return LIBRAW_NO_THUMBNAIL;
 			unsigned imgd_length = T.tlength - config_length;
 			unsigned sample_length = imgd_length - 8;
 			unsigned char *imgd = (unsigned char *)T.thumb + config_length;

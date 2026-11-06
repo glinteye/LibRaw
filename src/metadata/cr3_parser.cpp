@@ -155,12 +155,13 @@ void LibRaw::selectCRXTrack()
 	  {
 		  if (fsel)
 			  selectCRXFrame(i, fsel);
-		  if (d->MediaSize > maxjpegbytes)
+		  // unpack_thumb() puts the configuration boxes and an 8-byte box header first.
+		  INT64 hevc_length = INT64(d->MediaSize) + libraw_internal_data.unpacker_data.cr3_hevc_config_length + 8;
+		  if (d->MediaSize > maxjpegbytes && hevc_length <= 1024LL * 1024LL * LIBRAW_MAX_THUMBNAIL_MB)
 		  {
 			  maxjpegbytes = d->MediaSize;
 			  thumb_offset = d->MediaOffset;
-			  // unpack_thumb() puts the configuration boxes and an 8-byte box header first.
-			  thumb_length = d->MediaSize + libraw_internal_data.unpacker_data.cr3_hevc_config_length + 8;
+			  thumb_length = unsigned(hevc_length);
 			  libraw_internal_data.unpacker_data.cr3_hevc_sample_offset = d->MediaOffset;
 			  if (imgdata.thumbs_list.thumbcount < LIBRAW_THUMBNAIL_MAXCOUNT)
 			  {
