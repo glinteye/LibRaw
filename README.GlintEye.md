@@ -1,8 +1,8 @@
 # LibRaw for GlintEye
 
-This branch is LibRaw 0.22.2 plus one change used by
-GlintEye, a photo culling app that reads only the JPEG previews embedded in
-RAW files.
+This branch is LibRaw 0.22.2 plus two changes used by
+GlintEye, a photo culling app that reads only the previews embedded in RAW
+files.
 
 ## `LIBRAW_RAWOPTIONS_ALLOW_THUMBNAIL_ONLY`
 
@@ -20,9 +20,26 @@ if (libraw_open_file(lr, path) == LIBRAW_SUCCESS) {
 }
 ```
 
-Behaviour without the option is unchanged. The patch is the commit after the
-upstream `0.22.2` tag on this branch; release tags are named
-`0.22.2-glinteye.N`.
+Behaviour without the option is unchanged.
+
+## Full-size preview of Canon CR3 files shot with HDR PQ
+
+These files have no JPEG. Their `THMB` and `PRVW` previews, which stock LibRaw
+lists and returns as `LIBRAW_THUMBNAIL_H265`, are 320 and 1620 pixels wide. The
+full-size image is a grid of HEVC tiles in the file's first track, and stock
+LibRaw does not list it.
+
+This branch lists it as one more thumbnail with its real size, and the default
+`libraw_unpack_thumb()` selects it, as it does a CR3's full-size JPEG.
+`libraw_dcraw_make_mem_thumb()` returns it as `LIBRAW_IMAGE_H265`, in the
+layout of the `PRVW` data: the `GRID`, `CISZ`, `hvcC`, `colr` and `pixi`
+boxes, then an `IMGD` box holding each tile as a 4-byte length followed by its
+NAL units.
+
+## Tags
+
+The patches are the commits after the upstream `0.22.2` tag on this branch;
+release tags are named `0.22.2-glinteye.N`.
 
 ## License
 
