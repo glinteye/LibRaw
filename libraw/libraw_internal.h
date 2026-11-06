@@ -140,7 +140,7 @@ typedef struct
   // Not from header, but from datastream
   uint32_t MediaSize;
   INT64 MediaOffset;
-  uint32_t MediaType; /* 1 -> /C/RAW, 2-> JPEG, 3-> CTMD metadata*/
+  uint32_t MediaType; /* 1 -> /C/RAW, 2-> JPEG, 3-> CTMD metadata, 4-> HEVC */
   crx_sample_to_chunk_t * stsc_data; /* samples to chunk */
   uint32_t stsc_count;
   uint32_t sample_count;
@@ -177,6 +177,9 @@ typedef struct
   INT64 data_size;
   unsigned meta_length;
   unsigned cr3_exif_length, cr3_ifd0_length;
+  INT64 cr3_hevc_config_offset, cr3_hevc_sample_offset;
+  unsigned cr3_hevc_config_length;
+  ushort cr3_hevc_width, cr3_hevc_height;
   unsigned thumb_misc;
   enum LibRaw_internal_thumbnail_formats thumb_format;
   unsigned fuji_layout;

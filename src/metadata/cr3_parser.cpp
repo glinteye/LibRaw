@@ -151,6 +151,41 @@ void LibRaw::selectCRXTrack()
 		  parseCR3_CTMD(i);
 		  ctmdcount++;
 	  }
+	  else if (d->MediaType == 4) // HEVC, the full-size preview of HDR PQ files
+	  {
+		  if (fsel)
+			  selectCRXFrame(i, fsel);
+		  if (d->MediaSize > maxjpegbytes)
+		  {
+			  maxjpegbytes = d->MediaSize;
+			  thumb_offset = d->MediaOffset;
+			  // unpack_thumb() puts the configuration boxes and an 8-byte box header first.
+			  thumb_length = d->MediaSize + libraw_internal_data.unpacker_data.cr3_hevc_config_length + 8;
+			  libraw_internal_data.unpacker_data.cr3_hevc_sample_offset = d->MediaOffset;
+			  if (imgdata.thumbs_list.thumbcount < LIBRAW_THUMBNAIL_MAXCOUNT)
+			  {
+				  bool do_add = true;
+				  for (int idx = 0; idx < imgdata.thumbs_list.thumbcount; idx++)
+					  if (imgdata.thumbs_list.thumblist[idx].toffset == thumb_offset)
+					  {
+						  do_add = false;
+						  break;
+					  }
+				  if (do_add)
+				  {
+					  int idx = imgdata.thumbs_list.thumbcount;
+					  imgdata.thumbs_list.thumblist[idx].tformat = LIBRAW_INTERNAL_THUMBNAIL_JPEG;
+					  imgdata.thumbs_list.thumblist[idx].toffset = thumb_offset;
+					  imgdata.thumbs_list.thumblist[idx].tlength = thumb_length;
+					  imgdata.thumbs_list.thumblist[idx].tflip = 0xffff;
+					  imgdata.thumbs_list.thumblist[idx].tmisc = (3 << 5) | 8; // 3 samples/8 bps
+					  imgdata.thumbs_list.thumblist[idx].twidth = libraw_internal_data.unpacker_data.cr3_hevc_width;
+					  imgdata.thumbs_list.thumblist[idx].theight = libraw_internal_data.unpacker_data.cr3_hevc_height;
+					  imgdata.thumbs_list.thumbcount++;
+				  }
+			  }
+		  }
+	  }
 	  else if (d->MediaType == 2) // JPEG
 	  {
 		  if (fsel)
@@ -421,6 +456,7 @@ int LibRaw::parseCR3(UINT64 oAtomList,
       {"CRAW", 1},
 
       {"JPEG", 2},
+      {"HEVC", 2},
       {"CDI1", 2},
       {"CMP1", 2},
 
@@ -800,6 +836,22 @@ int LibRaw::parseCR3(UINT64 oAtomList,
     else if (!strcmp(AtomNameStack, "moovtrakmdiaminfstblstsdCRAWJPEG"))
     {
       current_track.MediaType = 2;
+    }
+    else if (!strcmp(AtomNameStack, "moovtrakmdiaminfstblstsdCRAWHEVC"))
+    {
+      // HDR PQ: a 4-byte count, then the GRID, CISZ, hvcC, colr and pixi boxes.
+      // The GRID box holds the image size in its last 4 bytes.
+      unsigned char grid[28];
+      memset(grid, 0, sizeof(grid));
+      if (szAtomContent > INT64(sizeof(grid)) && fread(grid, 1, sizeof(grid), ifp) == int(sizeof(grid)) &&
+          !memcmp(grid + 8, "GRID", 4))
+      {
+        current_track.MediaType = 4;
+        libraw_internal_data.unpacker_data.cr3_hevc_config_offset = oAtomContent + 4;
+        libraw_internal_data.unpacker_data.cr3_hevc_config_length = unsigned(szAtomContent - 4);
+        libraw_internal_data.unpacker_data.cr3_hevc_width = (grid[24] << 8) | grid[25];
+        libraw_internal_data.unpacker_data.cr3_hevc_height = (grid[26] << 8) | grid[27];
+      }
     }
     else if (!strcmp(AtomNameStack, "moovtrakmdiaminfstblstsc"))
     {

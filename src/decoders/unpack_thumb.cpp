@@ -160,6 +160,30 @@ int LibRaw::unpack_thumb(void)
 #else
         T.thumb = (char *)malloc(T.tlength);
 #endif
+		unsigned config_length = libraw_internal_data.unpacker_data.cr3_hevc_config_length;
+		if (config_length && ID.toffset == libraw_internal_data.unpacker_data.cr3_hevc_sample_offset)
+		{
+			// The CR3 sample holds only image data; its configuration is in the
+			// track header. Join them in the layout of the H.265 PRVW data below:
+			// configuration boxes, then the image data in an IMGD box.
+			unsigned imgd_length = T.tlength - config_length;
+			unsigned sample_length = imgd_length - 8;
+			unsigned char *imgd = (unsigned char *)T.thumb + config_length;
+			ID.input->seek(libraw_internal_data.unpacker_data.cr3_hevc_config_offset, SEEK_SET);
+			if (ID.input->read(T.thumb, 1, config_length) != int(config_length))
+				return LIBRAW_IO_ERROR;
+			imgd[0] = imgd_length >> 24;
+			imgd[1] = imgd_length >> 16;
+			imgd[2] = imgd_length >> 8;
+			imgd[3] = imgd_length;
+			memcpy(imgd + 4, "IMGD", 4);
+			ID.input->seek(ID.toffset, SEEK_SET);
+			if (ID.input->read(imgd + 8, 1, sample_length) != int(sample_length))
+				return LIBRAW_IO_ERROR;
+			T.tformat = LIBRAW_THUMBNAIL_H265;
+			SET_PROC_FLAG(LIBRAW_PROGRESS_THUMB_LOAD);
+			return 0;
+		}
         ID.input->read(T.thumb, 1, T.tlength);
 		unsigned char *tthumb = (unsigned char *)T.thumb;
 		if (Tformat == LIBRAW_INTERNAL_THUMBNAIL_JPEGXL)
